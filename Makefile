@@ -6,7 +6,7 @@
 #    By: amassias <amassias@student.42lehavre.fr    +#+  +:+       +#+         #
 #                                                 +#+#+#+#+#+   +#+            #
 #    Created: 2023/11/20 01:35:15 by amassias          #+#    #+#              #
-#    Updated: 2023/11/26 05:49:44 by amassias         ###   ########.fr        #
+#    Updated: 2023/11/29 13:03:21 by amassias         ###   ########.fr        #
 #                                                                              #
 # **************************************************************************** #
 
@@ -47,7 +47,9 @@ LFLAGS			:=		\
 # **************************************************************************** #
 
 FILES			:=		\
-	main
+	main				\
+	utils				\
+	exec
 
 SRCS			:=	$(addprefix $(SRC_DIR)/,$(addsuffix .c,$(FILES)))
 

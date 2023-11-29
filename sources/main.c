@@ -6,93 +6,113 @@
 /*   By: amassias <amassias@student.42lehavre.fr    +#+  +:+       +#+        */
 /*                                                +#+#+#+#+#+   +#+           */
 /*   Created: 2023/11/25 19:41:10 by amassias          #+#    #+#             */
-/*   Updated: 2023/11/29 08:31:01 by amassias         ###   ########.fr       */
+/*   Updated: 2023/11/29 13:44:48 by amassias         ###   ########.fr       */
+/*                                                                            */
+/* ************************************************************************** */
+
+/**
+ * @file main.c
+ * @author Antoine Massias (amassias@student.42lehavre.fr)
+ * @date 2023-11-29
+ * @copyright Copyright (c) 2023
+ */
+
+/* ************************************************************************** */
+/*                                                                            */
+/* Includes                                                                   */
 /*                                                                            */
 /* ************************************************************************** */
 
 #include "libft.h"
 
-#include <stdbool.h>
+#include "utils.h"
+
 #include <fcntl.h>
 #include <stdio.h>
-#include <string.h>
-#include <sys/stat.h>
-#include <sys/types.h>
-#include <sys/wait.h>
 
-#define TMP_FILE_PATH "/tmp/pipex-heredoc-tmp-file"
+/* ************************************************************************** */
+/*                                                                            */
+/* Global variables                                                           */
+/*                                                                            */
+/* ************************************************************************** */
 
-#define HEREDOC "here_doc"
+char	*g_pname = NULL;
 
-#define ERROR_MISSING_ARG "Missing operand"
-#define ERROR_INT "Internal error"
-#define ERROR_HEREDOC_INT "Internal error while reading here_doc"
-#define ERROR_COMMAND_NOT_FOUND "%s: command not found: %s\n"
+/* ************************************************************************** */
+/*                                                                            */
+/* Helper prototypes                                                          */
+/*                                                                            */
+/* ************************************************************************** */
 
-#define BUFFER_SIZE 4096
-
-#define RET_OK 0
-#define RET_ERR 1
-
-#define PIPE__READ 0
-#define PIPE__WRITE 1
-
-typedef struct s_args {
-	int		input_fd;
-	int		out_fd;
-	int		null_fd;
-	char	**start;
-	char	**end;
-	char	**paths;
-	char	**envp;
-}			t_args;
-
-static char	*g_pname = NULL;
-
-static void	_error_message(
-				const char *pname,
-				const char *message)
-{
-	ft_fprintf(STDERR_FILENO, "%s: %s.\n", pname, message);
-}
-
+/**
+ * @brief 
+ * @param in 
+ * @param out 
+ * @return int 
+ * @author Antoine Massias (amassias@student.42lehavre.fr)
+ * @date 2023-11-29
+ * @todo Make documentation.
+ */
 static int	_cat(
 				int in,
-				int out)
-{
-	static unsigned char	buffer[BUFFER_SIZE] = {0};
-	ssize_t					n;
+				int out);
 
-	while (1)
+/* ************************************************************************** */
+/*                                                                            */
+/* Main                                                                       */
+/*                                                                            */
+/* ************************************************************************** */
+
+int	main(
+		int argc,
+		char *argv[],
+		char *envp[])
+{
+	t_args	args;
+	int		ret;
+
+	g_pname = argv[0];
+	args.envp = envp;
+	args.null_fd = open("/dev/null", O_RDWR, 0666);
+	if (args.null_fd < 0)
+		return (EXIT_FAILURE);
+	if (parse_input(argc, argv, &args) != RET_OK)
+		return (EXIT_FAILURE);
+	args.paths = get_paths(envp);
+	if (args.start == args.end)
 	{
-		n = read(in, buffer, BUFFER_SIZE);
-		if (n <= 0)
-			break ;
-		n = write(out, buffer, (size_t) n);
-		if (n < 0)
-			break ;
+		if (_cat(args.input_fd, args.out_fd) != RET_OK)
+			return (EXIT_FAILURE);
+		return (EXIT_SUCCESS);
 	}
-	if (n < 0)
-		return (perror(g_pname), RET_ERR);
-	return (RET_OK);
+	ret = execute_sub_process_list(&args, args.out_fd);
+	close(args.null_fd);
+	free_string_list(&args.paths);
+	return (ret);
 }
 
-static int	_read_here_doc(
-				const char *end,
-				t_args *args)
+/* ************************************************************************** */
+/*                                                                            */
+/* Header implementations                                                     */
+/*                                                                            */
+/* ************************************************************************** */
+
+int	read_here_doc(
+		const char *end,
+		t_args *args)
 {
 	char	*line;
 	size_t	l;
 
 	args->input_fd = open(TMP_FILE_PATH, O_WRONLY | O_CREAT | O_TRUNC, 0666);
 	if (args->input_fd < 0)
-		return (_error_message(g_pname, ERROR_HEREDOC_INT), RET_ERR);
+		return (error_message(g_pname, ERROR_HEREDOC_INT), RET_ERR);
 	while (1)
 	{
 		ft_printf("heredoc> ");
 		line = get_next_line(STDIN_FILENO);
 		if (line == NULL)
-			return (_error_message(g_pname, ERROR_HEREDOC_INT),
+			return (error_message(g_pname, ERROR_HEREDOC_INT),
 				close(args->input_fd), RET_ERR);
 		l = ft_strlen(line);
 		line[l - 1] = '\0';
@@ -108,27 +128,9 @@ static int	_read_here_doc(
 	return (RET_OK);
 }
 
-static char	**_get_paths(
-				char *envp[])
-{
-	char	*path;
-
-	while (*envp)
-	{
-		if (ft_strncmp(*envp, "PATH=", 5) != 0)
-		{
-			++envp;
-			continue ;
-		}
-		path = (*envp) + 5;
-		return (ft_split(path, ':'));
-	}
-	return (NULL);
-}
-
-static char	*_get_absolute_path(
-				char *command,
-				char **paths)
+char	*get_absolute_path(
+			char *command,
+			char **paths)
 {
 	char	*res;
 	size_t	command_size;
@@ -153,132 +155,29 @@ static char	*_get_absolute_path(
 	return (NULL);
 }
 
-static int	_parse_input(
-				int argc,
-				char *argv[],
-				t_args *args)
-{
-	int	flags;
+/* ************************************************************************** */
+/*                                                                            */
+/* Helper definitions                                                         */
+/*                                                                            */
+/* ************************************************************************** */
 
-	flags = O_WRONLY | O_CREAT;
-	if (argc < 3)
-		return (_error_message(g_pname, ERROR_MISSING_ARG), RET_ERR);
-	args->start = &argv[2];
-	args->end = &argv[argc - 1];
-	if (ft_strcmp(argv[1], HEREDOC) == 0)
-	{
-		if (argc < 4)
-			return (_error_message(g_pname, ERROR_MISSING_ARG), RET_ERR);
-		if (_read_here_doc(argv[2], args))
-			return (RET_ERR);
-		flags |= O_APPEND;
-		args->start = &argv[3];
-	}
-	else
-	{
-		args->input_fd = open(argv[1], O_RDONLY);
-		flags |= O_TRUNC;
-	}
-	if (args->input_fd < 0)
-		return (perror(g_pname), RET_ERR);
-	args->out_fd = open(argv[argc - 1], flags, 0666);
-	if (args->out_fd < 0)
-		return (perror(g_pname), close(args->input_fd), RET_ERR);
-	return (RET_OK);
-}
-
-static void	_free_argv(
-				char ***argv_ptr)
-{
-	char	**argv;
-
-	argv = *argv_ptr;
-	while (*argv)
-		free(*argv++);
-	free(*argv_ptr);
-	*argv_ptr = NULL;
-}
-
-static int	_execute_sub_process_list(
+static int	_cat(
 				int in,
-				t_args *args,
 				int out)
 {
-	pid_t	command_pid;
-	int		ret;
-	char	*cmd;
-	char	**argv;
-	int		pipe_fd[2];
+	static unsigned char	buffer[BUFFER_SIZE] = {0};
+	ssize_t					n;
 
-	--args->end;
-	argv = ft_split(*args->end, ' ');
-	cmd = _get_absolute_path(argv[0], args->paths);
-	if (cmd == NULL)
+	while (1)
 	{
-		ft_fprintf(STDERR_FILENO, ERROR_COMMAND_NOT_FOUND, g_pname, argv[0]);
-		_free_argv(&argv);
-		close(out);
-		if (args->start != args->end)
-			_execute_sub_process_list(in, args, args->null_fd);
-		return (127);
+		n = read(in, buffer, BUFFER_SIZE);
+		if (n <= 0)
+			break ;
+		n = write(out, buffer, (size_t) n);
+		if (n < 0)
+			break ;
 	}
-	pipe_fd[PIPE__WRITE] = args->null_fd;
-	if (args->start == args->end)
-		pipe_fd[PIPE__READ] = in;
-	else if (pipe(pipe_fd))
-		pipe_fd[PIPE__READ] = args->null_fd;
-	command_pid = fork();
-	if (command_pid == 0)
-	{
-		close(pipe_fd[PIPE__WRITE]);
-		if (dup2(pipe_fd[PIPE__READ], STDIN_FILENO) < 0
-			|| dup2(out, STDOUT_FILENO) < 0)
-			exit(EXIT_FAILURE);
-		close(pipe_fd[PIPE__READ]);
-		close(out);
-		execve(cmd, argv, args->envp);
-		free(cmd);
-		_free_argv(&argv);
-		exit(EXIT_FAILURE);
-	}
-	free(cmd);
-	_free_argv(&argv);
-	if (command_pid < 0)
-		return (_error_message(g_pname, ERROR_INT), RET_ERR);
-	if (out != args->null_fd)
-		close(out);
-	if (pipe_fd[PIPE__READ] != args->null_fd)
-		close(pipe_fd[PIPE__READ]);
-	if (args->start != args->end)
-		_execute_sub_process_list(in, args, pipe_fd[PIPE__WRITE]);
-	waitpid(command_pid, &ret, 0);
-	return (ret);
-}
-
-int	main(
-		int argc,
-		char *argv[],
-		char *envp[])
-{
-	t_args	args;
-	int		ret;
-
-	g_pname = argv[0];
-	if (_parse_input(argc, argv, &args) != RET_OK)
-		return (EXIT_FAILURE);
-	args.null_fd = open("/dev/null", O_RDWR, 0666);
-	if (args.null_fd < 0)
-		return (EXIT_FAILURE);
-	args.envp = envp;
-	args.paths = _get_paths(envp);
-	if (args.start == args.end)
-	{
-		if (_cat(args.input_fd, args.out_fd) != RET_OK)
-			return (EXIT_FAILURE);
-		return (EXIT_SUCCESS);
-	}
-	ret = _execute_sub_process_list(args.input_fd, &args, args.out_fd);
-	close(args.null_fd);
-	_free_argv(&args.paths);
-	return (ret);
+	if (n < 0)
+		return (perror(g_pname), RET_ERR);
+	return (RET_OK);
 }
