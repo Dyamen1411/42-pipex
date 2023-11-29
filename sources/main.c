@@ -6,7 +6,7 @@
 /*   By: amassias <amassias@student.42lehavre.fr    +#+  +:+       +#+        */
 /*                                                +#+#+#+#+#+   +#+           */
 /*   Created: 2023/11/25 19:41:10 by amassias          #+#    #+#             */
-/*   Updated: 2023/11/26 08:58:45 by amassias         ###   ########.fr       */
+/*   Updated: 2023/11/29 08:31:01 by amassias         ###   ########.fr       */
 /*                                                                            */
 /* ************************************************************************** */
 
@@ -20,144 +20,265 @@
 #include <sys/types.h>
 #include <sys/wait.h>
 
+#define TMP_FILE_PATH "/tmp/pipex-heredoc-tmp-file"
+
 #define HEREDOC "here_doc"
 
+#define ERROR_MISSING_ARG "Missing operand"
+#define ERROR_INT "Internal error"
 #define ERROR_HEREDOC_INT "Internal error while reading here_doc"
+#define ERROR_COMMAND_NOT_FOUND "%s: command not found: %s\n"
+
+#define BUFFER_SIZE 4096
+
+#define RET_OK 0
+#define RET_ERR 1
 
 #define PIPE__READ 0
 #define PIPE__WRITE 1
 
-static pid_t	g_here_doc_pid = -1;
-static char		*g_pname = NULL;
+typedef struct s_args {
+	int		input_fd;
+	int		out_fd;
+	int		null_fd;
+	char	**start;
+	char	**end;
+	char	**paths;
+	char	**envp;
+}			t_args;
 
-static void	error_message(
+static char	*g_pname = NULL;
+
+static void	_error_message(
 				const char *pname,
 				const char *message)
 {
 	ft_fprintf(STDERR_FILENO, "%s: %s.\n", pname, message);
 }
 
-static int	_get_input(
-				int *argc,
-				char ***argv)
+static int	_cat(
+				int in,
+				int out)
 {
-	int		fd[2];
-	char	*line;
-	size_t	here_doc_len;
-	t_list	*lines;
-	t_list	*node;
+	static unsigned char	buffer[BUFFER_SIZE] = {0};
+	ssize_t					n;
 
-	if (ft_strncmp((*argv)[1], HEREDOC, sizeof(HEREDOC)) != 0)
+	while (1)
 	{
-		fd[0] = open((*argv)[1], O_RDONLY);
-		if (fd[0] >= 0)
-			return (fd[0]);
-		perror(g_pname);
-		exit(EXIT_FAILURE);
+		n = read(in, buffer, BUFFER_SIZE);
+		if (n <= 0)
+			break ;
+		n = write(out, buffer, (size_t) n);
+		if (n < 0)
+			break ;
 	}
-	(*argc)--;
-	(*argv)++;
-	if (*argc < 3)
-	{
-		error_message(g_pname, "Missing arguments");
-		// Usage ?
-		exit(EXIT_FAILURE);
-	}
-	here_doc_len = ft_strlen((*argv)[1]);
-	(*argv)[1][here_doc_len] = '\n';
-	lines = NULL;
+	if (n < 0)
+		return (perror(g_pname), RET_ERR);
+	return (RET_OK);
+}
+
+static int	_read_here_doc(
+				const char *end,
+				t_args *args)
+{
+	char	*line;
+	size_t	l;
+
+	args->input_fd = open(TMP_FILE_PATH, O_WRONLY | O_CREAT | O_TRUNC, 0666);
+	if (args->input_fd < 0)
+		return (_error_message(g_pname, ERROR_HEREDOC_INT), RET_ERR);
 	while (1)
 	{
 		ft_printf("heredoc> ");
 		line = get_next_line(STDIN_FILENO);
 		if (line == NULL)
-		{
-			ft_lstclear(&lines, free);
-			error_message(g_pname, ERROR_HEREDOC_INT);
-			exit(EXIT_FAILURE);
-		}
-		if (strncmp(line, (*argv)[1], here_doc_len + 1) == 0)
-		{
-			free(line);
+			return (_error_message(g_pname, ERROR_HEREDOC_INT),
+				close(args->input_fd), RET_ERR);
+		l = ft_strlen(line);
+		line[l - 1] = '\0';
+		if (ft_strcmp(end, line) == 0)
 			break ;
-		}
-		node = ft_lstnew(line);
-		if (node == NULL)
+		line[l - 1] = '\n';
+		(ft_putstr_fd(line, args->input_fd), free(line));
+	}
+	(free(line), close(args->input_fd));
+	args->input_fd = open(TMP_FILE_PATH, O_RDONLY, 0666);
+	if (args->input_fd < 0)
+		return (RET_ERR);
+	return (RET_OK);
+}
+
+static char	**_get_paths(
+				char *envp[])
+{
+	char	*path;
+
+	while (*envp)
+	{
+		if (ft_strncmp(*envp, "PATH=", 5) != 0)
 		{
-			ft_lstclear(&lines, free);
-			error_message(g_pname, ERROR_HEREDOC_INT);
-			return (1);
+			++envp;
+			continue ;
 		}
-		ft_lstadd_back(&lines, node);
+		path = (*envp) + 5;
+		return (ft_split(path, ':'));
 	}
-	if (pipe(fd))
+	return (NULL);
+}
+
+static char	*_get_absolute_path(
+				char *command,
+				char **paths)
+{
+	char	*res;
+	size_t	command_size;
+	size_t	path_size;
+
+	command_size = ft_strlen(command);
+	while (*paths)
 	{
-		perror(g_pname);
+		path_size = ft_strlen(*paths);
+		res = (char *) malloc(path_size + 1 + command_size + 1);
+		if (res == NULL)
+			return (NULL);
+		ft_memcpy(res, *paths, path_size);
+		ft_memcpy(res + path_size + 1, command, command_size);
+		res[path_size] = '/';
+		res[path_size + command_size + 1] = '\0';
+		if (access(res, F_OK) == 0)
+			return (res);
+		free(res);
+		++paths;
+	}
+	return (NULL);
+}
+
+static int	_parse_input(
+				int argc,
+				char *argv[],
+				t_args *args)
+{
+	int	flags;
+
+	flags = O_WRONLY | O_CREAT;
+	if (argc < 3)
+		return (_error_message(g_pname, ERROR_MISSING_ARG), RET_ERR);
+	args->start = &argv[2];
+	args->end = &argv[argc - 1];
+	if (ft_strcmp(argv[1], HEREDOC) == 0)
+	{
+		if (argc < 4)
+			return (_error_message(g_pname, ERROR_MISSING_ARG), RET_ERR);
+		if (_read_here_doc(argv[2], args))
+			return (RET_ERR);
+		flags |= O_APPEND;
+		args->start = &argv[3];
+	}
+	else
+	{
+		args->input_fd = open(argv[1], O_RDONLY);
+		flags |= O_TRUNC;
+	}
+	if (args->input_fd < 0)
+		return (perror(g_pname), RET_ERR);
+	args->out_fd = open(argv[argc - 1], flags, 0666);
+	if (args->out_fd < 0)
+		return (perror(g_pname), close(args->input_fd), RET_ERR);
+	return (RET_OK);
+}
+
+static void	_free_argv(
+				char ***argv_ptr)
+{
+	char	**argv;
+
+	argv = *argv_ptr;
+	while (*argv)
+		free(*argv++);
+	free(*argv_ptr);
+	*argv_ptr = NULL;
+}
+
+static int	_execute_sub_process_list(
+				int in,
+				t_args *args,
+				int out)
+{
+	pid_t	command_pid;
+	int		ret;
+	char	*cmd;
+	char	**argv;
+	int		pipe_fd[2];
+
+	--args->end;
+	argv = ft_split(*args->end, ' ');
+	cmd = _get_absolute_path(argv[0], args->paths);
+	if (cmd == NULL)
+	{
+		ft_fprintf(STDERR_FILENO, ERROR_COMMAND_NOT_FOUND, g_pname, argv[0]);
+		_free_argv(&argv);
+		close(out);
+		if (args->start != args->end)
+			_execute_sub_process_list(in, args, args->null_fd);
+		return (127);
+	}
+	pipe_fd[PIPE__WRITE] = args->null_fd;
+	if (args->start == args->end)
+		pipe_fd[PIPE__READ] = in;
+	else if (pipe(pipe_fd))
+		pipe_fd[PIPE__READ] = args->null_fd;
+	command_pid = fork();
+	if (command_pid == 0)
+	{
+		close(pipe_fd[PIPE__WRITE]);
+		if (dup2(pipe_fd[PIPE__READ], STDIN_FILENO) < 0
+			|| dup2(out, STDOUT_FILENO) < 0)
+			exit(EXIT_FAILURE);
+		close(pipe_fd[PIPE__READ]);
+		close(out);
+		execve(cmd, argv, args->envp);
+		free(cmd);
+		_free_argv(&argv);
 		exit(EXIT_FAILURE);
 	}
-	g_here_doc_pid = fork();
-	if (g_here_doc_pid < 0)
-	{
-		perror(g_pname);
-		exit(EXIT_FAILURE);
-	}
-	if (g_here_doc_pid != 0)
-	{
-		close(fd[PIPE__WRITE]);
-		return (fd[PIPE__READ]);
-	}
-	close(fd[PIPE__READ]);
-	if (dup2(fd[PIPE__WRITE], STDOUT_FILENO) == -1)
-	{
-		close(fd[PIPE__WRITE]);
-		perror(g_pname);
-		exit(EXIT_FAILURE);
-	}
-	ft_lstiter(lines, (void (*)(void *))ft_putstr);
-	close(fd[PIPE__WRITE]);
-	ft_lstclear(&lines, free);
-	exit(EXIT_SUCCESS);
+	free(cmd);
+	_free_argv(&argv);
+	if (command_pid < 0)
+		return (_error_message(g_pname, ERROR_INT), RET_ERR);
+	if (out != args->null_fd)
+		close(out);
+	if (pipe_fd[PIPE__READ] != args->null_fd)
+		close(pipe_fd[PIPE__READ]);
+	if (args->start != args->end)
+		_execute_sub_process_list(in, args, pipe_fd[PIPE__WRITE]);
+	waitpid(command_pid, &ret, 0);
+	return (ret);
 }
 
 int	main(
 		int argc,
-		char *argv[])
+		char *argv[],
+		char *envp[])
 {
-	int	input_fd;
-	int	output_fd;
+	t_args	args;
+	int		ret;
 
 	g_pname = argv[0];
-	if (argc < 3)
-	{
-		error_message(argv[0], "Missing arguments");
-		// Usage ?
+	if (_parse_input(argc, argv, &args) != RET_OK)
 		return (EXIT_FAILURE);
-	}
-
-	input_fd = _get_input(&argc, &argv);
-	output_fd = open(argv[argc - 1], O_WRONLY | O_CREAT);
-	if (output_fd < 0)
+	args.null_fd = open("/dev/null", O_RDWR, 0666);
+	if (args.null_fd < 0)
+		return (EXIT_FAILURE);
+	args.envp = envp;
+	args.paths = _get_paths(envp);
+	if (args.start == args.end)
 	{
-		close(input_fd);
+		if (_cat(args.input_fd, args.out_fd) != RET_OK)
+			return (EXIT_FAILURE);
+		return (EXIT_SUCCESS);
 	}
-
-	// if (does_use_heredoc && argc < 4)
-	// {
-	// 	ft_fprintf(STDERR_FILENO, "%s: Missing arguments.\n", argv[0]);
-	// 	// Usage ?
-	// 	return (EXIT_FAILURE);
-	// }
-	// out_flags = O_RDWR | O_CREAT | O_SYNC;
-	// if (does_use_heredoc)
-	// 	out_flags |= O_APPEND;
-	// out_fd = open(argv[argc - 1], out_flags, 0666);
-	// if (out_fd < 0)
-	// 	return (perror(argv[0]), EXIT_FAILURE);
-	
-	// if (pipe(pipe_fd))
-	// 	return (close(out_fd), perror(argv[0]), EXIT_FAILURE);
-	// close(out_fd);
-	// close(pipe_fd[PIPE__READ]);
-	// close(pipe_fd[PIPE__WRITE]);
-	return (0);
+	ret = _execute_sub_process_list(args.input_fd, &args, args.out_fd);
+	close(args.null_fd);
+	_free_argv(&args.paths);
+	return (ret);
 }
